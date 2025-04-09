@@ -23,6 +23,8 @@ const DrawingCanvas = () => {
   const [tool, setTool] = useState('pencil');
   // const [lines, setLines] = useState([]);
   // const [shapes, setShapes] = useState([]);
+  const [savedDrawings, setSavedDrawings] = useState({});
+
   const [drawings, setDrawings] = useState([]);
   const eraserRadius = 10;
   const isErasing = useRef(false);
@@ -43,6 +45,7 @@ const DrawingCanvas = () => {
 
   const isDrawing = useRef(false);
   const stageRef = useRef(null);
+  const stageRefs = useRef({});
 
   const partTextStyle = {
     // fontSize: 14,
@@ -51,6 +54,14 @@ const DrawingCanvas = () => {
     fill: '#333',
     padding: 6,
   };
+
+  const saveCurrentViewDrawings = () => {
+    const key = `${gender}-${view}`;
+    setSavedDrawings(prev => ({
+      ...prev,
+      [key]: drawings
+    }));
+  };  
 
   const [showShapeEditor, setShowShapeEditor] = useState(false);
   // const [customShapeSize, setCustomShapeSize] = useState(10);
@@ -225,42 +236,151 @@ const DrawingCanvas = () => {
   };
 
   const handleZoomSelect = (part) => {
+    saveCurrentViewDrawings();
+    const nextKey = `${gender}-${part}`;
+    setDrawings(savedDrawings[nextKey] || []);
     setZoomMode(false);
     setView(part);
-    setDrawings([])
   };
 
   const handleResetView = () => {
+    saveCurrentViewDrawings();
+    const nextKey = `${gender}-full-body`;
+    setDrawings(savedDrawings[nextKey] || []);
     setZoomMode(false);
     setView('full-body');
-  };
+  };  
 
-  const handleDownload = () => {
-    if (!stageRef.current || !bodyImage) {
-      alert('Body image is still loading. Please try again in a moment.');
-      return;
+  const handleDownload = async () => {
+    saveCurrentViewDrawings(); // ✅ Add this BEFORE generating the PDF
+    const jsPDF = (await import('jspdf')).default;
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'px', format: [595, 842] });
+  
+    const views = [
+      'full-body',
+      'back',
+      'head-neck',
+      'upper-body',
+      'left-arm',
+      'right-arm',
+      'left-leg',
+      'right-leg',
+    ];
+  
+    const originalGender = gender;
+    const originalView = view;
+    const results = [];
+  
+    // Helper to wait for canvas draw
+    const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+  
+    for (const v of views) {
+      // Switch to next view
+      setView(v);
+      await wait(200);
+      const key = `${gender}-${v}`;
+  
+      const stage = stageRefs.current[key];
+      if (!stage) continue;
+  
+      stage.batchDraw();
+      await wait(300); // Wait for image and shapes to render
+  
+      const dataURL = stage.toDataURL({ pixelRatio: 2 });
+      results.push({ view: v, image: dataURL });
     }
   
-    // 🔄 Step 1: Ensure canvas is updated
-    stageRef.current.batchDraw();
+    // Restore original view
+    setView(originalView);
+    setGender(originalGender);
   
-    // 🔄 Step 2: Small delay AFTER render to allow GPU flush
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        const uri = stageRef.current.toDataURL({ pixelRatio: 2 });
+    // PDF: 4 per page layout
+    const imgW = 200, imgH = 350;
+    const marginX = 70, marginY = 40;
+    const gapX = 50, gapY = 30;
   
-        const link = document.createElement('a');
-        const filename = `${gender}-${view}.png`;
-        link.download = filename;
-        link.href = uri;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      }, 1000); // slight buffer to ensure full draw
+    for (let i = 0; i < results.length; i += 4) {
+      if (i > 0) pdf.addPage();
+  
+      results.slice(i, i + 4).forEach((img, idx) => {
+        const row = Math.floor(idx / 2);
+        const col = idx % 2;
+        const x = marginX + col * (imgW + gapX);
+        const y = marginY + row * (imgH + gapY);
+  
+        pdf.addImage(img.image, 'PNG', x, y, imgW, imgH);
+        pdf.setFontSize(12);
+        pdf.text(img.view.replace(/-/g, ' ').toUpperCase(), x, y - 6);
+      });
+    }
+  
+    // ✅ Add shape legend
+    pdf.addPage();
+    pdf.setFontSize(18);
+    pdf.text('Shape Legend', 40, 40);
+    pdf.setFontSize(14);
+  
+    let y = 70;
+    Object.entries(shapeConfigs).forEach(([tool, config]) => {
+      const x = 50;
+      pdf.setDrawColor(config.color);
+      pdf.setFillColor(255, 255, 255);
+      pdf.setLineWidth(1);
+
+      switch (tool) {
+        case 'sharp-pain': // Triangle
+          pdf.triangle = function (x1, y1, x2, y2, x3, y3, style = 'FD') {
+            this.lines([
+              [x2 - x1, y2 - y1],
+              [x3 - x2, y3 - y2],
+              [x1 - x3, y1 - y3]
+            ], x1, y1);
+            this.setFillColor(config.color);
+            if (style.includes('F')) this.setFillColor(config.color);
+            if (style.includes('D')) this.setDrawColor(config.color);
+            this.close();
+          };
+          pdf.triangle(x, y - 5, x - 7, y + 7, x + 7, y + 7, 'FD');
+          break;
+
+        case 'dull-ache': // Circle
+          pdf.circle(x, y, 6, 'FD');
+          break;
+
+        case 'tingling': // Square
+          pdf.rect(x - 6, y - 6, 12, 12, 'FD');
+          break;
+
+        case 'numbness': // Star (drawn using polygon points)
+          const spikes = 5;
+          const outerRadius = 6;
+          const innerRadius = 3;
+          const angle = Math.PI / spikes;
+          const cx = x, cy = y;
+          let starPoints = [];
+          for (let i = 0; i < 2 * spikes; i++) {
+            const r = i % 2 === 0 ? outerRadius : innerRadius;
+            const a = i * angle - Math.PI / 2;
+            const sx = cx + r * Math.cos(a);
+            const sy = cy + r * Math.sin(a);
+            starPoints.push([sx, sy]);
+          }
+          pdf.lines(starPoints.map(([px, py], i) => {
+            const next = starPoints[(i + 1) % starPoints.length];
+            return [next[0] - px, next[1] - py];
+          }), starPoints[0][0], starPoints[0][1], [1, 1], 'FD');
+          break;
+      }
+
+      pdf.setTextColor(0, 0, 0);
+      pdf.setFontSize(14);
+      pdf.text(`${config.label}`, x + 30, y + 4);
+      y += 30;
     });
-  };
+
   
-  // const handleSwitchGender = () => setGender(gender === 'man' ? 'woman' : 'man');
+    pdf.save(`${gender}-pain-diagram.pdf`);
+  };
 
   useEffect(() => {
     const handleResize = () => {
@@ -306,7 +426,11 @@ const DrawingCanvas = () => {
     window.addEventListener('resize', resize);
     return () => window.removeEventListener('resize', resize);
   }, []);
-  
+
+  useEffect(() => {
+    const key = `${gender}-${view}`;
+    setDrawings(savedDrawings[key] || []);
+  }, [gender, view]);
 
   return (
     <div className="drawing-wrapper">
@@ -330,7 +454,8 @@ const DrawingCanvas = () => {
           onTouchMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onTouchEnd={handleMouseUp}
-          ref={stageRef}
+          // visible={false}
+          ref={(node) => { stageRefs.current[`${gender}-${view}`] = node }}
         >
           <Layer>
             {bodyImage && (
@@ -648,14 +773,24 @@ const DrawingCanvas = () => {
         <div className="gender-toggle-row">
           <button
             className={`gender-btn ${gender === 'man' ? 'selected' : ''}`}
-            onClick={() => setGender('man')}
+            onClick={() => {
+              saveCurrentViewDrawings();
+              const nextKey = `man-${view}`;
+              setGender('man');
+              setDrawings(savedDrawings[nextKey] || []);
+            }}
           >
             <img src="/icons/male-21-512.png" alt="Male" className="icon-img" />
             <text className='tool-name'> Male </text>
           </button>
           <button
             className={`gender-btn ${gender === 'woman' ? 'selected' : ''}`}
-            onClick={() => setGender('woman')}
+            onClick={() => {
+              saveCurrentViewDrawings();
+              const nextKey = `woman-${view}`;
+              setGender('woman');
+              setDrawings(savedDrawings[nextKey] || []);
+            }}
           >
             <img src="/icons/female-28-512.png" alt="Female" className="icon-img" />
             <text className='tool-name'> Female </text>
